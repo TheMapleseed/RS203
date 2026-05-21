@@ -1,0 +1,16 @@
+[package]
+name = "fips203-tunnel"
+description = "TCP tunnel binary (pure Rust + tokio)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fips203_tunnel"
+path = "src/main.rs"
+
+[dependencies]
+fips203-core = { path = "../fips203-core" }
+tokio = { version = "1", features = ["net", "io-util", "io-std", "rt-multi-thread", "sync", "signal", "macros", "time"] }

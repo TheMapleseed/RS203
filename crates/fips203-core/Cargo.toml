@@ -1,0 +1,12 @@
+[package]
+name = "fips203-core"
+description = "Pure-Rust ML-KEM-768, FIPS203TUNNEL-GCM, MSGPACK-C-compatible helpers (203 port)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
