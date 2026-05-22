@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::io::{Read, Write};
+use std::mem;
 use std::os::unix::net::UnixStream;
 use std::thread;
 
@@ -16,7 +16,7 @@ fn handshake_socket_pair_then_opaque_and_msgpack() {
     let cfg = test_handshake_config();
     let (mut server_io, mut client_io) = UnixStream::pair().expect("unix pair");
 
-    let cfg_srv = cfg.clone();
+    let cfg_srv = test_handshake_config();
     let server = thread::spawn(move || {
         let mut rt = TunnelRuntime::new(false, 1_000_000);
         handshake_server(&mut server_io, &cfg_srv, &mut rt).expect("server hs");
@@ -25,10 +25,10 @@ fn handshake_socket_pair_then_opaque_and_msgpack() {
 
     let mut client_rt = TunnelRuntime::new(true, 1_000_000);
     handshake_client(&mut client_io, &cfg, &mut client_rt).expect("client hs");
-    let server_rt = server.join().expect("server thread");
+    let mut server_rt = server.join().expect("server thread");
 
-    let mut client = client_rt.session;
-    let mut server = server_rt.session;
+    let mut client = mem::take(&mut client_rt.session);
+    let mut server = mem::take(&mut server_rt.session);
 
     let opaque = [0x10, 0x20, 0x30, 0x40, 0x50];
     assert_eq!(

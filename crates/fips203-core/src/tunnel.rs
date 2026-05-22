@@ -14,9 +14,16 @@ use crate::mlkem::{
     decaps, encaps, keygen, Ciphertext, EncapsKey, MLKEM768_CT_SIZE, MLKEM768_DK_SIZE,
     MLKEM768_EK_SIZE, MLKEM_SEED_SIZE,
 };
+use crate::secrets::secret_zeroize;
 
 pub const PEER_ID_SIZE: usize = 32;
 pub const DEFAULT_REKEY_INTERVAL: u64 = 100_000;
+/// Seconds to wait for a rekey ACK before failing the client send path.
+pub const DEFAULT_REKEY_ACK_TIMEOUT_SECS: u64 = 30;
+/// Per-read timeout while waiting for the next wire frame (0 = disabled).
+pub const DEFAULT_WIRE_READ_TIMEOUT_SECS: u64 = 300;
+/// Consecutive decrypt failures before tearing down the recv loop.
+pub const MAX_DECRYPT_FAILURES: u32 = 16;
 pub const HS_TRANSCRIPT_BYTES: usize =
     2 + PEER_ID_SIZE + PEER_ID_SIZE + 32 + 32 + SESSION_ID_SIZE + MLKEM768_EK_SIZE + MLKEM768_CT_SIZE;
 const MAC32_INPUT_MAX: usize = 32 + HS_TRANSCRIPT_BYTES;
@@ -27,15 +34,21 @@ pub const CTRL_ACK: u8 = 2;
 pub const CTRL_LEN: usize = 4 + 1 + 4 + REKEY_NONCE_SIZE;
 
 /// PSK + peer labels for handshake transcript MACs (`TUNNEL_PSK_HEX`, `TUNNEL_*_ID`).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HandshakeConfig {
     pub psk: [u8; 32],
     pub client_id: [u8; PEER_ID_SIZE],
     pub server_id: [u8; PEER_ID_SIZE],
 }
 
+impl Drop for HandshakeConfig {
+    fn drop(&mut self) {
+        secret_zeroize(&mut self.psk);
+    }
+}
+
 /// Live session plus in-band rekey state (C `S` minus pthread/TCP).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TunnelRuntime {
     pub session: TunnelSession,
     pub rekey_waiting: bool,
@@ -61,6 +74,12 @@ impl TunnelRuntime {
     }
 }
 
+impl Drop for TunnelRuntime {
+    fn drop(&mut self) {
+        secret_zeroize(&mut self.rekey_my_nonce);
+    }
+}
+
 /// Constant-time compare for 32-byte MACs.
 pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     ct_eq(a, b)
@@ -71,9 +90,70 @@ pub fn fill_random(buf: &mut [u8]) -> Result<()> {
     f.read_exact(buf).map_err(|_| Error::Crypto)
 }
 
+/// Best-effort wipe (see [`crate::secret_zeroize`]).
 pub fn zeroize(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        *b = 0;
+    secret_zeroize(buf);
+}
+
+struct ServerHsBuf {
+    ns: [u8; 32],
+    nc: [u8; 32],
+    sid: [u8; SESSION_ID_SIZE],
+    seed: [u8; MLKEM_SEED_SIZE],
+    ek: [u8; MLKEM768_EK_SIZE],
+    dk: [u8; MLKEM768_DK_SIZE],
+    ct: [u8; MLKEM768_CT_SIZE],
+    ac: [u8; 32],
+    as_: [u8; 32],
+    ex: [u8; 32],
+    tr: [u8; HS_TRANSCRIPT_BYTES],
+    ss: [u8; 32],
+}
+
+impl Drop for ServerHsBuf {
+    fn drop(&mut self) {
+        secret_zeroize(&mut self.ns);
+        secret_zeroize(&mut self.nc);
+        secret_zeroize(&mut self.sid);
+        secret_zeroize(&mut self.seed);
+        secret_zeroize(&mut self.ek);
+        secret_zeroize(&mut self.dk);
+        secret_zeroize(&mut self.ct);
+        secret_zeroize(&mut self.ac);
+        secret_zeroize(&mut self.as_);
+        secret_zeroize(&mut self.ex);
+        secret_zeroize(&mut self.tr);
+        secret_zeroize(&mut self.ss);
+    }
+}
+
+struct ClientHsBuf {
+    ns: [u8; 32],
+    nc: [u8; 32],
+    sid: [u8; SESSION_ID_SIZE],
+    m: [u8; MLKEM_SEED_SIZE],
+    ek: [u8; MLKEM768_EK_SIZE],
+    ct: [u8; MLKEM768_CT_SIZE],
+    ac: [u8; 32],
+    as_: [u8; 32],
+    ex: [u8; 32],
+    tr: [u8; HS_TRANSCRIPT_BYTES],
+    ss: [u8; 32],
+}
+
+impl Drop for ClientHsBuf {
+    fn drop(&mut self) {
+        secret_zeroize(&mut self.ns);
+        secret_zeroize(&mut self.nc);
+        secret_zeroize(&mut self.sid);
+        secret_zeroize(&mut self.m);
+        secret_zeroize(&mut self.ek);
+        secret_zeroize(&mut self.ct);
+        secret_zeroize(&mut self.ac);
+        secret_zeroize(&mut self.as_);
+        secret_zeroize(&mut self.ex);
+        secret_zeroize(&mut self.tr);
+        secret_zeroize(&mut self.ss);
     }
 }
 
@@ -128,7 +208,7 @@ pub fn mac32(out: &mut [u8; 32], psk: &[u8; 32], data: &[u8]) -> Result<()> {
     tmp[..32].copy_from_slice(psk);
     tmp[32..32 + data.len()].copy_from_slice(data);
     sha3_256(out, &tmp[..32 + data.len()]);
-    zeroize(&mut tmp);
+    secret_zeroize(&mut tmp);
     Ok(())
 }
 
@@ -181,50 +261,53 @@ pub fn handshake_server(
     cfg: &HandshakeConfig,
     runtime: &mut TunnelRuntime,
 ) -> io::Result<()> {
-    let mut ns = [0u8; 32];
-    let mut nc = [0u8; 32];
-    let mut sid = [0u8; SESSION_ID_SIZE];
-    let mut seed = [0u8; MLKEM_SEED_SIZE];
-    let mut ek = [0u8; MLKEM768_EK_SIZE];
-    let mut dk = [0u8; MLKEM768_DK_SIZE];
-    let mut ct = [0u8; MLKEM768_CT_SIZE];
-    let mut ac = [0u8; 32];
-    let mut as_ = [0u8; 32];
-    let mut ex = [0u8; 32];
-    let mut tr = [0u8; HS_TRANSCRIPT_BYTES];
+    let mut h = ServerHsBuf {
+        ns: [0u8; 32],
+        nc: [0u8; 32],
+        sid: [0u8; SESSION_ID_SIZE],
+        seed: [0u8; MLKEM_SEED_SIZE],
+        ek: [0u8; MLKEM768_EK_SIZE],
+        dk: [0u8; MLKEM768_DK_SIZE],
+        ct: [0u8; MLKEM768_CT_SIZE],
+        ac: [0u8; 32],
+        as_: [0u8; 32],
+        ex: [0u8; 32],
+        tr: [0u8; HS_TRANSCRIPT_BYTES],
+        ss: [0u8; 32],
+    };
 
-    fill_random(&mut seed).map_err(io_err)?;
-    fill_random(&mut ns).map_err(io_err)?;
-    fill_random(&mut sid).map_err(io_err)?;
-    let (ek_out, dk_out) = keygen(&seed).map_err(io_err)?;
-    ek = ek_out;
-    dk = dk_out;
+    fill_random(&mut h.seed).map_err(io_err)?;
+    fill_random(&mut h.ns).map_err(io_err)?;
+    fill_random(&mut h.sid).map_err(io_err)?;
+    let (ek_out, dk_out) = keygen(&h.seed).map_err(io_err)?;
+    h.ek = ek_out;
+    h.dk = dk_out;
 
-    conn.write_all(&ns)?;
-    conn.write_all(&sid)?;
-    conn.write_all(&ek)?;
-    conn.read_exact(&mut nc)?;
-    conn.read_exact(&mut ct)?;
-    conn.read_exact(&mut ac)?;
+    conn.write_all(&h.ns)?;
+    conn.write_all(&h.sid)?;
+    conn.write_all(&h.ek)?;
+    conn.read_exact(&mut h.nc)?;
+    conn.read_exact(&mut h.ct)?;
+    conn.read_exact(&mut h.ac)?;
 
-    let ss = decaps(&ct, &dk).map_err(io_err)?;
+    h.ss = decaps(&h.ct, &h.dk).map_err(io_err)?;
     handshake_transcript(
-        &mut tr,
+        &mut h.tr,
         &cfg.client_id,
         &cfg.server_id,
-        &ns,
-        &nc,
-        &sid,
-        &ek,
-        &ct,
+        &h.ns,
+        &h.nc,
+        &h.sid,
+        &h.ek,
+        &h.ct,
     );
-    mac32(&mut ex, &cfg.psk, &tr).map_err(io_err)?;
-    if !ct_eq(&ex, &ac) {
+    mac32(&mut h.ex, &cfg.psk, &h.tr).map_err(io_err)?;
+    if !ct_eq(&h.ex, &h.ac) {
         return Err(io::Error::other("handshake mac"));
     }
-    mac32(&mut as_, &cfg.psk, &ss).map_err(io_err)?;
-    conn.write_all(&as_)?;
-    derive_tunnel_session(&mut runtime.session, &ss, &ns, &nc, &sid, false);
+    mac32(&mut h.as_, &cfg.psk, &h.ss).map_err(io_err)?;
+    conn.write_all(&h.as_)?;
+    derive_tunnel_session(&mut runtime.session, &h.ss, &h.ns, &h.nc, &h.sid, false);
     Ok(())
 }
 
@@ -234,44 +317,48 @@ pub fn handshake_client(
     cfg: &HandshakeConfig,
     runtime: &mut TunnelRuntime,
 ) -> io::Result<()> {
-    let mut ns = [0u8; 32];
-    let mut nc = [0u8; 32];
-    let mut sid = [0u8; SESSION_ID_SIZE];
-    let mut m = [0u8; MLKEM_SEED_SIZE];
-    let mut ek = [0u8; MLKEM768_EK_SIZE];
-    let mut ct = [0u8; MLKEM768_CT_SIZE];
-    let mut ac = [0u8; 32];
-    let mut as_ = [0u8; 32];
-    let mut ex = [0u8; 32];
-    let mut tr = [0u8; HS_TRANSCRIPT_BYTES];
+    let mut h = ClientHsBuf {
+        ns: [0u8; 32],
+        nc: [0u8; 32],
+        sid: [0u8; SESSION_ID_SIZE],
+        m: [0u8; MLKEM_SEED_SIZE],
+        ek: [0u8; MLKEM768_EK_SIZE],
+        ct: [0u8; MLKEM768_CT_SIZE],
+        ac: [0u8; 32],
+        as_: [0u8; 32],
+        ex: [0u8; 32],
+        tr: [0u8; HS_TRANSCRIPT_BYTES],
+        ss: [0u8; 32],
+    };
 
-    fill_random(&mut nc).map_err(io_err)?;
-    fill_random(&mut m).map_err(io_err)?;
-    conn.read_exact(&mut ns)?;
-    conn.read_exact(&mut sid)?;
-    conn.read_exact(&mut ek)?;
-    let (ct_out, ss) = encaps(&ek, &m).map_err(io_err)?;
-    ct = ct_out;
+    fill_random(&mut h.nc).map_err(io_err)?;
+    fill_random(&mut h.m).map_err(io_err)?;
+    conn.read_exact(&mut h.ns)?;
+    conn.read_exact(&mut h.sid)?;
+    conn.read_exact(&mut h.ek)?;
+    let (ct_out, ss) = encaps(&h.ek, &h.m).map_err(io_err)?;
+    h.ct = ct_out;
+    h.ss = ss;
     handshake_transcript(
-        &mut tr,
+        &mut h.tr,
         &cfg.client_id,
         &cfg.server_id,
-        &ns,
-        &nc,
-        &sid,
-        &ek,
-        &ct,
+        &h.ns,
+        &h.nc,
+        &h.sid,
+        &h.ek,
+        &h.ct,
     );
-    mac32(&mut ac, &cfg.psk, &tr).map_err(io_err)?;
-    conn.write_all(&nc)?;
-    conn.write_all(&ct)?;
-    conn.write_all(&ac)?;
-    conn.read_exact(&mut as_)?;
-    mac32(&mut ex, &cfg.psk, &ss).map_err(io_err)?;
-    if !ct_eq(&ex, &as_) {
+    mac32(&mut h.ac, &cfg.psk, &h.tr).map_err(io_err)?;
+    conn.write_all(&h.nc)?;
+    conn.write_all(&h.ct)?;
+    conn.write_all(&h.ac)?;
+    conn.read_exact(&mut h.as_)?;
+    mac32(&mut h.ex, &cfg.psk, &h.ss).map_err(io_err)?;
+    if !ct_eq(&h.ex, &h.as_) {
         return Err(io::Error::other("handshake verify"));
     }
-    derive_tunnel_session(&mut runtime.session, &ss, &ns, &nc, &sid, true);
+    derive_tunnel_session(&mut runtime.session, &h.ss, &h.ns, &h.nc, &h.sid, true);
     Ok(())
 }
 
@@ -300,6 +387,34 @@ pub fn load_rekey_interval_from_env() -> u64 {
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_REKEY_INTERVAL),
         _ => DEFAULT_REKEY_INTERVAL,
+    }
+}
+
+/// `TUNNEL_REKEY_ACK_TIMEOUT` seconds (default [`DEFAULT_REKEY_ACK_TIMEOUT_SECS`]).
+pub fn load_rekey_ack_timeout_secs_from_env() -> u64 {
+    parse_positive_env_u64("TUNNEL_REKEY_ACK_TIMEOUT", DEFAULT_REKEY_ACK_TIMEOUT_SECS)
+}
+
+/// `TUNNEL_WIRE_READ_TIMEOUT` seconds; `0` disables the read deadline.
+pub fn load_wire_read_timeout_secs_from_env() -> u64 {
+    match env::var("TUNNEL_WIRE_READ_TIMEOUT") {
+        Ok(s) if !s.is_empty() => s.parse::<u64>().unwrap_or(DEFAULT_WIRE_READ_TIMEOUT_SECS),
+        _ => DEFAULT_WIRE_READ_TIMEOUT_SECS,
+    }
+}
+
+fn parse_positive_env_u64(name: &str, default: u64) -> u64 {
+    match env::var(name) {
+        Ok(s) if !s.is_empty() => s.parse::<u64>().ok().filter(|&n| n > 0).unwrap_or(default),
+        _ => default,
+    }
+}
+
+/// `TUNNEL_MLOCK=1` pins PSK (and other locked buffers) in RAM on Unix when permitted.
+pub fn load_mlock_from_env() -> bool {
+    match env::var("TUNNEL_MLOCK") {
+        Ok(s) => matches!(s.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
+        _ => false,
     }
 }
 

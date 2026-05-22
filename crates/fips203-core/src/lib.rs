@@ -26,9 +26,12 @@ mod fips202;
 mod frame;
 mod mlkem;
 mod msgpack;
+mod secrets;
 mod session;
 pub mod tunnel;
 mod wire;
+
+pub use secrets::{protect_sensitive, release_sensitive, secret_zeroize, try_mlock, try_munlock};
 
 pub use error::{Error, Result};
 pub use frame::{
@@ -51,8 +54,11 @@ pub use fips202::{sha3_256, shake256};
 
 pub use tunnel::{
     build_control, ct_eq_32, fill_random, handshake_client, handshake_server, handshake_transcript,
-    is_control, load_handshake_config_from_env, load_rekey_interval_from_env, mac32, open_plain,
-    seal_plain, u32_be, wire_buffer, HandshakeConfig, TunnelRuntime, CTRL_ACK, CTRL_LEN, CTRL_MAGIC,
-    CTRL_REQ, DEFAULT_REKEY_INTERVAL, HS_TRANSCRIPT_BYTES, PEER_ID_SIZE,
+    is_control, load_handshake_config_from_env, load_rekey_ack_timeout_secs_from_env,
+    load_mlock_from_env, load_rekey_interval_from_env, load_wire_read_timeout_secs_from_env, mac32,
+    open_plain,
+    seal_plain, u32_be, wire_buffer, HandshakeConfig, TunnelRuntime, CTRL_ACK, CTRL_LEN,
+    CTRL_MAGIC, CTRL_REQ, DEFAULT_REKEY_ACK_TIMEOUT_SECS, DEFAULT_REKEY_INTERVAL,
+    DEFAULT_WIRE_READ_TIMEOUT_SECS, HS_TRANSCRIPT_BYTES, MAX_DECRYPT_FAILURES, PEER_ID_SIZE,
 };
 pub use wire::{read_wire_frame, write_wire_frame};

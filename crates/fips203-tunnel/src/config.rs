@@ -1,9 +1,16 @@
 //! Tunnel configuration (PSK, peer IDs, queues, rekey).
 
 use std::env;
+use std::sync::Arc;
 
-use fips203_core::tunnel::{
-    load_handshake_config_from_env, load_rekey_interval_from_env, HandshakeConfig, PEER_ID_SIZE,
+use fips203_core::tunnel::load_mlock_from_env;
+use fips203_core::{
+    protect_sensitive, release_sensitive, secret_zeroize,
+    tunnel::{
+        load_handshake_config_from_env, load_rekey_ack_timeout_secs_from_env,
+        load_rekey_interval_from_env, load_wire_read_timeout_secs_from_env, HandshakeConfig,
+        DEFAULT_REKEY_ACK_TIMEOUT_SECS, DEFAULT_WIRE_READ_TIMEOUT_SECS, PEER_ID_SIZE,
+    },
 };
 
 pub use fips203_core::tunnel::DEFAULT_REKEY_INTERVAL;
@@ -13,34 +20,111 @@ pub const QUEUE_DEPTH_DEFAULT: usize = 64;
 pub const QUEUE_DEPTH_HARD_MAX: usize = 4096;
 pub const QUEUE_BYTES_DEFAULT: usize = 32 * 1024 * 1024;
 
+#[derive(Debug)]
+struct TunnelSecrets {
+    psk: [u8; 32],
+    client_id: [u8; ID_SIZE],
+    server_id: [u8; ID_SIZE],
+    rekey_interval: u64,
+    rekey_ack_timeout_secs: u64,
+    wire_read_timeout_secs: u64,
+    queue_depth: usize,
+    queue_clamped: bool,
+    mlock_psk: bool,
+}
+
+impl Drop for TunnelSecrets {
+    fn drop(&mut self) {
+        if self.mlock_psk {
+            release_sensitive(&mut self.psk);
+        } else {
+            secret_zeroize(&mut self.psk);
+        }
+    }
+}
+
 /// Runtime configuration for `fips203_tunnel` client/server/link.
+///
+/// `Clone` shares one `Arc` — the PSK is not copied into a second buffer.
 #[derive(Clone, Debug)]
 pub struct TunnelConfig {
-    pub psk: [u8; 32],
-    pub client_id: [u8; ID_SIZE],
-    pub server_id: [u8; ID_SIZE],
-    pub rekey_interval: u64,
-    pub queue_depth: usize,
-    pub queue_clamped: bool,
+    inner: Arc<TunnelSecrets>,
 }
 
 impl TunnelConfig {
     pub fn new(psk: [u8; 32], client_id: [u8; ID_SIZE], server_id: [u8; ID_SIZE]) -> Self {
-        Self {
-            psk,
-            client_id,
-            server_id,
-            rekey_interval: DEFAULT_REKEY_INTERVAL,
-            queue_depth: QUEUE_DEPTH_DEFAULT,
-            queue_clamped: false,
+        Self::from_parts(psk, client_id, server_id, DEFAULT_REKEY_INTERVAL, false)
+    }
+
+    fn from_parts(
+        mut psk: [u8; 32],
+        client_id: [u8; ID_SIZE],
+        server_id: [u8; ID_SIZE],
+        rekey_interval: u64,
+        mlock_psk: bool,
+    ) -> Self {
+        if mlock_psk {
+            protect_sensitive(&mut psk, true);
         }
+        Self {
+            inner: Arc::new(TunnelSecrets {
+                psk,
+                client_id,
+                server_id,
+                rekey_interval,
+                rekey_ack_timeout_secs: DEFAULT_REKEY_ACK_TIMEOUT_SECS,
+                wire_read_timeout_secs: DEFAULT_WIRE_READ_TIMEOUT_SECS,
+                queue_depth: QUEUE_DEPTH_DEFAULT,
+                queue_clamped: false,
+                mlock_psk,
+            }),
+        }
+    }
+
+    pub fn psk(&self) -> &[u8; 32] {
+        &self.inner.psk
+    }
+
+    pub fn client_id(&self) -> &[u8; ID_SIZE] {
+        &self.inner.client_id
+    }
+
+    pub fn server_id(&self) -> &[u8; ID_SIZE] {
+        &self.inner.server_id
+    }
+
+    pub fn rekey_interval(&self) -> u64 {
+        self.inner.rekey_interval
+    }
+
+    pub fn rekey_ack_timeout_secs(&self) -> u64 {
+        self.inner.rekey_ack_timeout_secs
+    }
+
+    pub fn wire_read_timeout_secs(&self) -> u64 {
+        self.inner.wire_read_timeout_secs
+    }
+
+    pub fn queue_depth(&self) -> usize {
+        self.inner.queue_depth
+    }
+
+    pub fn queue_clamped(&self) -> bool {
+        self.inner.queue_clamped
     }
 
     pub fn handshake(&self) -> HandshakeConfig {
         HandshakeConfig {
-            psk: self.psk,
-            client_id: self.client_id,
-            server_id: self.server_id,
+            psk: self.inner.psk,
+            client_id: self.inner.client_id,
+            server_id: self.inner.server_id,
+        }
+    }
+
+    /// Update when this is the only outstanding `Arc` (typical in tests).
+    pub fn set_rekey_interval(&mut self, n: u64) {
+        if let Some(s) = Arc::get_mut(&mut self.inner) {
+            s.rekey_interval = n;
         }
     }
 }
@@ -49,15 +133,30 @@ impl TunnelConfig {
 pub fn from_env() -> Result<TunnelConfig, String> {
     let hs = load_handshake_config_from_env().map_err(|_| "handshake env vars invalid".to_string())?;
     let rekey_interval = load_rekey_interval_from_env();
+    let rekey_ack_timeout_secs = load_rekey_ack_timeout_secs_from_env();
+    let wire_read_timeout_secs = load_wire_read_timeout_secs_from_env();
+    let mlock_psk = load_mlock_from_env();
     let (queue_depth, queue_clamped) = configure_queue_depth()?;
-    Ok(TunnelConfig {
-        psk: hs.psk,
-        client_id: hs.client_id,
-        server_id: hs.server_id,
+    let mut cfg = TunnelConfig::from_parts(
+        hs.psk,
+        hs.client_id,
+        hs.server_id,
         rekey_interval,
-        queue_depth,
-        queue_clamped,
-    })
+        mlock_psk,
+    );
+    Arc::get_mut(&mut cfg.inner)
+        .expect("unique config")
+        .rekey_ack_timeout_secs = rekey_ack_timeout_secs;
+    Arc::get_mut(&mut cfg.inner)
+        .expect("unique config")
+        .wire_read_timeout_secs = wire_read_timeout_secs;
+    Arc::get_mut(&mut cfg.inner)
+        .expect("unique config")
+        .queue_depth = queue_depth;
+    Arc::get_mut(&mut cfg.inner)
+        .expect("unique config")
+        .queue_clamped = queue_clamped;
+    Ok(cfg)
 }
 
 /// Back-compat alias used internally by the binary.

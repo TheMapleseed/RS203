@@ -20,6 +20,9 @@ exclude = ["tests/**"]
 name = "fips203_core"
 path = "src/lib.rs"
 
+[dev-dependencies]
+proptest = "1.6"
+
 [[example]]
 name = "loopback_std"
 path = "examples/loopback_std.rs"

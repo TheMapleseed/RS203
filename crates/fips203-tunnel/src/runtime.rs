@@ -3,8 +3,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use fips203_core::{payload_is_quit, tunnel::fill_random, MAX_MSG};
+use fips203_core::{
+    payload_is_quit, tunnel::fill_random, MAX_DECRYPT_FAILURES, MAX_MSG,
+};
 use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::time::{timeout, Duration};
 
 use crate::config::REKEY_NONCE_SIZE;
 use crate::crypto_tunnel::{
@@ -19,6 +22,8 @@ pub type WriteHalf = Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>;
 pub struct SharedSession {
     pub inner: Mutex<SessionHandle>,
     pub rekey_done: Notify,
+    pub rekey_ack_timeout_secs: u64,
+    pub wire_read_timeout_secs: u64,
 }
 
 pub async fn send_plain(sess: &SharedSession, wr: &WriteHalf, plain: &[u8]) -> std::io::Result<()> {
@@ -42,13 +47,19 @@ pub async fn maybe_handle_control(
         return Ok(0);
     }
     if ty == CTRL_ACK {
-        return Ok(0);
+        // Consumed on the wire; never deliver to application (avoids RKY1-shaped app data issues).
+        return Ok(1);
     }
     if ty != CTRL_REQ {
         return Err(std::io::Error::other("bad control"));
     }
     let guard = sess.inner.lock().await;
-    if want_epoch != guard.session.epoch + 1 {
+    let next_epoch = guard
+        .session
+        .epoch
+        .checked_add(1)
+        .ok_or_else(|| std::io::Error::other("epoch overflow"))?;
+    if want_epoch != next_epoch {
         return Err(std::io::Error::other("epoch"));
     }
     let mut my_nonce = [0u8; REKEY_NONCE_SIZE];
@@ -83,7 +94,11 @@ pub async fn maybe_initiate_rekey(sess: &SharedSession, wr: &WriteHalf) -> std::
         if guard.session.is_client == 0 || guard.session.txs < guard.session.rekey_interval {
             return Ok(());
         }
-        let next_epoch = guard.session.epoch + 1;
+        let next_epoch = guard
+            .session
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("epoch overflow"))?;
         let mut my_nonce = [0u8; REKEY_NONCE_SIZE];
         fill_random(&mut my_nonce).map_err(|_| std::io::Error::other("random"))?;
         let mut req = [0u8; CTRL_LEN];
@@ -99,12 +114,30 @@ pub async fn maybe_initiate_rekey(sess: &SharedSession, wr: &WriteHalf) -> std::
         let mut w = wr.lock().await;
         write_wire_frame(&mut *w, &wire, wl).await?;
     }
+    let ack_timeout = Duration::from_secs(sess.rekey_ack_timeout_secs.max(1));
+    let deadline = tokio::time::Instant::now() + ack_timeout;
     loop {
         let waiting = sess.inner.lock().await.rekey_waiting;
         if !waiting {
             break;
         }
-        sess.rekey_done.notified().await;
+        let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remain.is_zero() {
+            let mut guard = sess.inner.lock().await;
+            guard.rekey_waiting = false;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "rekey ack timeout",
+            ));
+        }
+        if timeout(remain, sess.rekey_done.notified()).await.is_err() {
+            let mut guard = sess.inner.lock().await;
+            guard.rekey_waiting = false;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "rekey ack timeout",
+            ));
+        }
     }
     Ok(())
 }
@@ -120,16 +153,26 @@ pub async fn recv_loop(
 ) {
     let mut wire = wire_buf();
     let mut plain = vec![0u8; MAX_MSG];
+    let mut decrypt_failures = 0u32;
     while !shutdown.load(Ordering::SeqCst) {
-        let wl = match read_wire_frame(&mut rd, &mut wire).await {
+        let wl = match read_wire_frame(&mut rd, &mut wire, sess.wire_read_timeout_secs).await {
             Ok(n) => n,
             Err(_) => break,
         };
         let plen = {
             let mut guard = sess.inner.lock().await;
             match open_frame(&mut guard.session, &wire[..wl], &mut plain) {
-                Ok(n) => n,
-                Err(_) => break,
+                Ok(n) => {
+                    decrypt_failures = 0;
+                    n
+                }
+                Err(_) => {
+                    decrypt_failures = decrypt_failures.saturating_add(1);
+                    if decrypt_failures >= MAX_DECRYPT_FAILURES {
+                        break;
+                    }
+                    continue;
+                }
             }
         };
         let payload = plain[..plen].to_vec();
@@ -161,13 +204,6 @@ pub async fn recv_loop(
             Ok(0) => {}
             Ok(_) => continue,
             Err(_) => break,
-        }
-
-        let mut ty = 0u8;
-        let mut epoch = 0u32;
-        let mut nonce = [0u8; REKEY_NONCE_SIZE];
-        if is_control(&payload, &mut ty, &mut epoch, &mut nonce) {
-            continue;
         }
 
         if let Some(role) = display_role {

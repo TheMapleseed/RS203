@@ -1,10 +1,13 @@
 //! TCP wire framing (length prefix + seq + epoch + ciphertext + tag).
 
+use std::time::Duration;
+
 use fips203_core::{MAX_MSG, MAX_WIRE, TAG};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
 
-pub async fn read_wire_frame(
+async fn read_wire_frame_inner(
     rd: &mut (impl AsyncRead + Unpin),
     wire: &mut [u8],
 ) -> std::io::Result<usize> {
@@ -33,6 +36,25 @@ pub async fn read_wire_frame(
     }
     rd.read_exact(&mut wire[16 + n..total]).await?;
     Ok(total)
+}
+
+/// Read one frame; `read_timeout_secs == 0` means no deadline.
+pub async fn read_wire_frame(
+    rd: &mut (impl AsyncRead + Unpin),
+    wire: &mut [u8],
+    read_timeout_secs: u64,
+) -> std::io::Result<usize> {
+    if read_timeout_secs == 0 {
+        return read_wire_frame_inner(rd, wire).await;
+    }
+    let d = Duration::from_secs(read_timeout_secs);
+    match timeout(d, read_wire_frame_inner(rd, wire)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "wire read timeout",
+        )),
+    }
 }
 
 pub async fn write_wire_frame(

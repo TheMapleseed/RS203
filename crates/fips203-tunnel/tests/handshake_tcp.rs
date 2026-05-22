@@ -10,7 +10,7 @@ use tokio::time::timeout;
 
 fn test_config() -> TunnelConfig {
     let mut cfg = TunnelConfig::new([0xCD; 32], peer_id(b"c"), peer_id(b"s"));
-    cfg.rekey_interval = 10_000_000;
+    cfg.set_rekey_interval(10_000_000);
     cfg
 }
 
@@ -32,7 +32,7 @@ async fn tcp_handshake_completes() {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut rd, wr) = stream.into_split();
             let wr = Arc::new(Mutex::new(wr));
-            let mut sess = SessionHandle::new(false, cfg_srv.rekey_interval);
+            let mut sess = SessionHandle::new(false, cfg_srv.rekey_interval());
             let mut w = wr.lock().await;
             handshake_server(&cfg_srv, &mut rd, &mut *w, &mut sess).await.unwrap();
             sess.session.epoch
@@ -41,7 +41,7 @@ async fn tcp_handshake_completes() {
         let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let (mut rd, wr) = stream.into_split();
         let wr = Arc::new(Mutex::new(wr));
-        let mut sess = SessionHandle::new(true, cfg.rekey_interval);
+        let mut sess = SessionHandle::new(true, cfg.rekey_interval());
         let mut w = wr.lock().await;
         handshake_client(&cfg, &mut rd, &mut *w, &mut sess).await.unwrap();
         assert_eq!(sess.session.epoch, 0);

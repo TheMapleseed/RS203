@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::fips202::{sha3_256, shake256};
+use crate::secrets::secret_zeroize;
 
 pub const TAG: usize = 16;
 pub const SESSION_ID_SIZE: usize = 16;
@@ -12,7 +13,7 @@ pub const MAX_WIRE: usize = 32 + MAX_MSG;
 const TAG_INPUT_MAX: usize = 32 + AAD_SIZE + MAX_MSG;
 
 /// Mutable session state (`fips203_tunnel_session_core_t`, 200 bytes).
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct TunnelSession {
     pub txe: [u8; 32],
     pub txm: [u8; 32],
@@ -27,6 +28,18 @@ pub struct TunnelSession {
     /// `1` = client, `0` = server (wire direction / rekey).
     pub is_client: u32,
     pub rekey_interval: u64,
+}
+
+impl Drop for TunnelSession {
+    fn drop(&mut self) {
+        secret_zeroize(&mut self.txe);
+        secret_zeroize(&mut self.txm);
+        secret_zeroize(&mut self.rxe);
+        secret_zeroize(&mut self.rxm);
+        secret_zeroize(&mut self.txb);
+        secret_zeroize(&mut self.rxb);
+        secret_zeroize(&mut self.session_id);
+    }
 }
 
 pub const SESSION_STATE_BYTES: usize = 200;
@@ -70,8 +83,8 @@ pub fn derive_tunnel_session(
     s.epoch = 0;
     s.txs = 0;
     s.rxs = 0;
-    zeroize(&mut inp);
-    zeroize(&mut out);
+    secret_zeroize(&mut inp);
+    secret_zeroize(&mut out);
 }
 
 /// In-band epoch rekey (`rekey_apply` in `tunnel_main.c`).
@@ -129,14 +142,8 @@ pub fn rekey_apply(
     s.epoch = new_epoch;
     s.txs = 0;
     s.rxs = 0;
-    zeroize(&mut inp);
-    zeroize(&mut out);
-}
-
-fn zeroize(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        *b = 0;
-    }
+    secret_zeroize(&mut inp);
+    secret_zeroize(&mut out);
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -192,7 +199,7 @@ fn ks(out: &mut [u8], k: &[u8; 32], no: &[u8; 12]) {
     seed[..32].copy_from_slice(k);
     seed[32..].copy_from_slice(no);
     shake256(out, &seed);
-    zeroize(&mut seed);
+    secret_zeroize(&mut seed);
 }
 
 fn compute_tag(
@@ -211,7 +218,7 @@ fn compute_tag(
         tmp[32 + AAD_SIZE..32 + AAD_SIZE + c.len()].copy_from_slice(c);
     }
     sha3_256(t, &tmp[..32 + AAD_SIZE + c.len()]);
-    zeroize(&mut tmp);
+    secret_zeroize(&mut tmp);
     Ok(())
 }
 
@@ -234,7 +241,7 @@ fn encrypt(
     let mut full = [0u8; 32];
     compute_tag(&mut full, mk, aad, &c[..n])?;
     t.copy_from_slice(&full[..TAG]);
-    zeroize(&mut full);
+    secret_zeroize(&mut full);
     Ok(())
 }
 
@@ -251,10 +258,10 @@ fn decrypt(
     let mut full = [0u8; 32];
     compute_tag(&mut full, mk, aad, c)?;
     if !ct_eq(&full[..TAG], t) {
-        zeroize(&mut full);
+        secret_zeroize(&mut full);
         return Err(Error::Crypto);
     }
-    zeroize(&mut full);
+    secret_zeroize(&mut full);
     if n > 0 {
         ks(p, ek, no);
         for i in 0..n {
@@ -360,6 +367,6 @@ pub fn frame_seal(
     }
     wire_out[16 + n..wire_len].copy_from_slice(&tg);
     session.txs += 1;
-    zeroize(&mut c);
+    secret_zeroize(&mut c);
     Ok(wire_len)
 }

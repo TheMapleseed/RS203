@@ -91,12 +91,12 @@ impl TunnelLink {
         mode: LinkMode,
     ) -> std::io::Result<Self> {
         let wr = Arc::new(Mutex::new(wr));
-        let mut sess = SessionHandle::new(true, cfg.rekey_interval);
+        let mut sess = SessionHandle::new(true, cfg.rekey_interval());
         {
             let mut w = wr.lock().await;
             handshake_client(cfg, &mut rd, &mut *w, &mut sess).await?;
         }
-        Self::spawn_tasks(rd, wr, sess, cfg.queue_depth, mode).await
+        Self::spawn_tasks(rd, wr, sess, cfg, mode).await
     }
 
     async fn from_server_halves(
@@ -106,19 +106,19 @@ impl TunnelLink {
         mode: LinkMode,
     ) -> std::io::Result<Self> {
         let wr = Arc::new(Mutex::new(wr));
-        let mut sess = SessionHandle::new(false, cfg.rekey_interval);
+        let mut sess = SessionHandle::new(false, cfg.rekey_interval());
         {
             let mut w = wr.lock().await;
             handshake_server(cfg, &mut rd, &mut *w, &mut sess).await?;
         }
-        Self::spawn_tasks(rd, wr, sess, cfg.queue_depth, mode).await
+        Self::spawn_tasks(rd, wr, sess, cfg, mode).await
     }
 
     async fn spawn_tasks(
         rd: tokio::net::tcp::OwnedReadHalf,
         wr: WriteHalf,
         sess: SessionHandle,
-        queue_depth: usize,
+        cfg: &TunnelConfig,
         mode: LinkMode,
     ) -> std::io::Result<Self> {
         let stop_tx_on_quit = matches!(mode, LinkMode::StdinClient);
@@ -132,10 +132,12 @@ impl TunnelLink {
         let shared = Arc::new(SharedSession {
             inner: Mutex::new(sess),
             rekey_done: tokio::sync::Notify::new(),
+            rekey_ack_timeout_secs: cfg.rekey_ack_timeout_secs(),
+            wire_read_timeout_secs: cfg.wire_read_timeout_secs(),
         });
 
-        let (out_tx, out_rx) = mpsc::channel(queue_depth);
-        let (in_tx, in_rx) = mpsc::channel(queue_depth);
+        let (out_tx, out_rx) = mpsc::channel(cfg.queue_depth());
+        let (in_tx, in_rx) = mpsc::channel(cfg.queue_depth());
 
         let sh_recv = Arc::clone(&shutdown);
         let sh_tx = Arc::clone(&shutdown);
@@ -317,6 +319,8 @@ impl TunnelLink {
         } = self;
         shutdown.store(true, Ordering::SeqCst);
         signal_task.abort();
+        recv_task.abort();
+        tx_task.abort();
         let _ = wr.lock().await.shutdown();
         drop(incoming);
         let _ = recv_task.await;

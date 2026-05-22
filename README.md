@@ -94,7 +94,7 @@ export TUNNEL_SERVER_ID=bob
 ./target/release/fips203_tunnel client 127.0.0.1 9999
 ```
 
-Optional: `TUNNEL_QUEUE_DEPTH`, `TUNNEL_MAX_QUEUE_MB`, `TUNNEL_MAX_QUEUE_BYTES`, `TUNNEL_REKEY_INTERVAL`.
+Optional: `TUNNEL_QUEUE_DEPTH`, `TUNNEL_MAX_QUEUE_MB`, `TUNNEL_MAX_QUEUE_BYTES`, `TUNNEL_REKEY_INTERVAL`, `TUNNEL_REKEY_ACK_TIMEOUT` (default 30s), `TUNNEL_WIRE_READ_TIMEOUT` (default 300s; `0` = none), `TUNNEL_MLOCK=1` (Unix: pin PSK in RAM).
 
 ## Wire interop (optional, vs C `fips203_tunnel`)
 

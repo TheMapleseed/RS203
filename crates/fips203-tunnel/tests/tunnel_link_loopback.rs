@@ -13,7 +13,7 @@ fn test_config() -> TunnelConfig {
         padded_id(b"link_client"),
         padded_id(b"link_server"),
     );
-    cfg.rekey_interval = 10_000_000;
+    cfg.set_rekey_interval(10_000_000);
     cfg
 }
 

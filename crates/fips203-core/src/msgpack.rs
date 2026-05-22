@@ -90,6 +90,11 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
+    fn read_payload(&mut self, len: usize) -> Result<&'a [u8]> {
+        self.alloc_check(len)?;
+        self.read_bytes(len)
+    }
+
     fn alloc_check(&mut self, size: usize) -> Result<()> {
         if self.max_alloc != 0 {
             if size > self.max_alloc || self.cur_alloc > self.max_alloc - size {
@@ -168,7 +173,7 @@ impl<'a> Reader<'a> {
         }
         if (b & 0xe0) == 0xa0 {
             let n = (b & 0x1f) as usize;
-            return Ok(Value::Str(self.read_bytes(n)?));
+            return Ok(Value::Str(self.read_payload(n)?));
         }
         if (b & 0xf0) == 0x90 {
             let n = (b & 0x0f) as usize;
@@ -191,27 +196,27 @@ impl<'a> Reader<'a> {
             0xcb => Ok(Value::Float(self.read_f64()?)),
             0xd9 => {
                 let n = self.read_u8()? as usize;
-                Ok(Value::Str(self.read_bytes(n)?))
+                Ok(Value::Str(self.read_payload(n)?))
             }
             0xda => {
                 let n = self.read_be_u16()? as usize;
-                Ok(Value::Str(self.read_bytes(n)?))
+                Ok(Value::Str(self.read_payload(n)?))
             }
             0xdb => {
                 let n = self.read_be_u32()? as usize;
-                Ok(Value::Str(self.read_bytes(n)?))
+                Ok(Value::Str(self.read_payload(n)?))
             }
             0xc4 => {
                 let n = self.read_u8()? as usize;
-                Ok(Value::Bin(self.read_bytes(n)?))
+                Ok(Value::Bin(self.read_payload(n)?))
             }
             0xc5 => {
                 let n = self.read_be_u16()? as usize;
-                Ok(Value::Bin(self.read_bytes(n)?))
+                Ok(Value::Bin(self.read_payload(n)?))
             }
             0xc6 => {
                 let n = self.read_be_u32()? as usize;
-                Ok(Value::Bin(self.read_bytes(n)?))
+                Ok(Value::Bin(self.read_payload(n)?))
             }
             0xdc => {
                 let n = self.read_be_u16()? as usize;
@@ -274,7 +279,7 @@ impl<'a> Reader<'a> {
         }
         Ok(Value::Ext {
             typ,
-            data: self.read_bytes(size)?,
+            data: self.read_payload(size)?,
         })
     }
 
@@ -293,7 +298,7 @@ impl<'a> Reader<'a> {
         }
         Ok(Value::Ext {
             typ,
-            data: self.read_bytes(size)?,
+            data: self.read_payload(size)?,
         })
     }
 
@@ -302,7 +307,7 @@ impl<'a> Reader<'a> {
         let typ = self.read_u8()? as i8;
         Ok(Value::Ext {
             typ,
-            data: self.read_bytes(size)?,
+            data: self.read_payload(size)?,
         })
     }
 
@@ -311,7 +316,7 @@ impl<'a> Reader<'a> {
         let typ = self.read_u8()? as i8;
         Ok(Value::Ext {
             typ,
-            data: self.read_bytes(size)?,
+            data: self.read_payload(size)?,
         })
     }
 

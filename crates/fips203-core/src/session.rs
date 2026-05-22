@@ -1,7 +1,9 @@
 //! Big-endian session blob pack/unpack (`fips203_session_pack` / `unpack`).
 
 use crate::error::{Error, Result};
-use crate::frame::{TunnelSession, SESSION_ID_SIZE, SESSION_PACKED_BYTES, SESSION_STATE_BYTES};
+use crate::frame::{
+    TunnelSession, MAX_FRAMES, SESSION_ID_SIZE, SESSION_PACKED_BYTES, SESSION_STATE_BYTES,
+};
 
 pub const SESSION_PACK_HEADER_U64: u64 = 0x4632_3033_5331_0001;
 
@@ -47,6 +49,12 @@ pub fn session_unpack(input: &[u8], session: &mut TunnelSession) -> Result<()> {
     session.is_client = be_load_u32(&input[196..200]);
     session.rekey_interval = be_load_u64(&input[200..208]);
     let _ = SESSION_STATE_BYTES;
+    if session.txs >= MAX_FRAMES || session.rxs >= MAX_FRAMES {
+        return Err(Error::Crypto);
+    }
+    if session.is_client > 1 {
+        return Err(Error::Crypto);
+    }
     Ok(())
 }
 
