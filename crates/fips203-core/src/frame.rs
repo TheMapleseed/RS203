@@ -31,6 +31,107 @@ pub struct TunnelSession {
 
 pub const SESSION_STATE_BYTES: usize = 200;
 pub const SESSION_PACKED_BYTES: usize = 216;
+pub const REKEY_NONCE_SIZE: usize = 32;
+
+/// Post-handshake key derivation (`derive()` in `tunnel_main.c`).
+pub fn derive_tunnel_session(
+    s: &mut TunnelSession,
+    ss: &[u8; 32],
+    ns: &[u8; 32],
+    nc: &[u8; 32],
+    sid: &[u8; SESSION_ID_SIZE],
+    init_client: bool,
+) {
+    let mut inp = [0u8; 128];
+    inp[..32].copy_from_slice(ss);
+    inp[32..64].copy_from_slice(ns);
+    inp[64..96].copy_from_slice(nc);
+    inp[96..112].copy_from_slice(sid);
+    inp[112..128].copy_from_slice(&b"FIPS203-TUNNEL-V3"[..16]);
+    let mut out = [0u8; 152];
+    shake256(&mut out, &inp);
+    if init_client {
+        s.txe.copy_from_slice(&out[..32]);
+        s.txm.copy_from_slice(&out[32..64]);
+        s.rxe.copy_from_slice(&out[64..96]);
+        s.rxm.copy_from_slice(&out[96..128]);
+        s.txb.copy_from_slice(&out[128..140]);
+        s.rxb.copy_from_slice(&out[140..152]);
+    } else {
+        s.rxe.copy_from_slice(&out[..32]);
+        s.rxm.copy_from_slice(&out[32..64]);
+        s.txe.copy_from_slice(&out[64..96]);
+        s.txm.copy_from_slice(&out[96..128]);
+        s.rxb.copy_from_slice(&out[128..140]);
+        s.txb.copy_from_slice(&out[140..152]);
+    }
+    s.session_id.copy_from_slice(sid);
+    s.is_client = if init_client { 1 } else { 0 };
+    s.epoch = 0;
+    s.txs = 0;
+    s.rxs = 0;
+    zeroize(&mut inp);
+    zeroize(&mut out);
+}
+
+/// In-band epoch rekey (`rekey_apply` in `tunnel_main.c`).
+pub fn rekey_apply(
+    s: &mut TunnelSession,
+    new_epoch: u32,
+    client_nonce: &[u8; REKEY_NONCE_SIZE],
+    server_nonce: &[u8; REKEY_NONCE_SIZE],
+) {
+    let mut c2s_e = [0u8; 32];
+    let mut c2s_m = [0u8; 32];
+    let mut s2c_e = [0u8; 32];
+    let mut s2c_m = [0u8; 32];
+    let mut c2s_b = [0u8; 12];
+    let mut s2c_b = [0u8; 12];
+    let mut inp = [0u8; 32 + 32 + 32 + 16 + 4 + REKEY_NONCE_SIZE + REKEY_NONCE_SIZE];
+    let mut out = [0u8; 152];
+    if s.is_client != 0 {
+        inp[..32].copy_from_slice(&s.txe);
+        inp[32..64].copy_from_slice(&s.txm);
+        inp[64..96].copy_from_slice(&s.rxe);
+    } else {
+        inp[..32].copy_from_slice(&s.rxe);
+        inp[32..64].copy_from_slice(&s.rxm);
+        inp[64..96].copy_from_slice(&s.txe);
+    }
+    inp[96..112].copy_from_slice(b"FIPS203-REKEY-V1");
+    let mut eb = [0u8; 4];
+    b32(&mut eb, new_epoch);
+    inp[112..116].copy_from_slice(&eb);
+    inp[116..116 + REKEY_NONCE_SIZE].copy_from_slice(client_nonce);
+    inp[148..].copy_from_slice(server_nonce);
+    shake256(&mut out, &inp);
+    c2s_e.copy_from_slice(&out[..32]);
+    c2s_m.copy_from_slice(&out[32..64]);
+    s2c_e.copy_from_slice(&out[64..96]);
+    s2c_m.copy_from_slice(&out[96..128]);
+    c2s_b.copy_from_slice(&out[128..140]);
+    s2c_b.copy_from_slice(&out[140..152]);
+    if s.is_client != 0 {
+        s.txe.copy_from_slice(&c2s_e);
+        s.txm.copy_from_slice(&c2s_m);
+        s.rxe.copy_from_slice(&s2c_e);
+        s.rxm.copy_from_slice(&s2c_m);
+        s.txb.copy_from_slice(&c2s_b);
+        s.rxb.copy_from_slice(&s2c_b);
+    } else {
+        s.rxe.copy_from_slice(&c2s_e);
+        s.rxm.copy_from_slice(&c2s_m);
+        s.txe.copy_from_slice(&s2c_e);
+        s.txm.copy_from_slice(&s2c_m);
+        s.rxb.copy_from_slice(&c2s_b);
+        s.txb.copy_from_slice(&s2c_b);
+    }
+    s.epoch = new_epoch;
+    s.txs = 0;
+    s.rxs = 0;
+    zeroize(&mut inp);
+    zeroize(&mut out);
+}
 
 fn zeroize(buf: &mut [u8]) {
     for b in buf.iter_mut() {

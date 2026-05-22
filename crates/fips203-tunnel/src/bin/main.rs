@@ -1,16 +1,9 @@
-//! `fips203_tunnel` — pure Rust TCP tunnel (port of TheMapleseed/203 `tunnel_main.c`).
-
-mod client;
-mod config;
-mod crypto_tunnel;
-mod runtime;
-mod server;
-mod wire;
+//! `fips203_tunnel` — stdin client / echo server over encrypted TCP.
 
 use std::env;
 use std::process;
 
-use config::{load_tunnel_env, parse_port};
+use fips203_tunnel::{from_env, parse_port, run_client, run_server};
 
 fn usage(prog: &str) -> ! {
     eprintln!(
@@ -32,7 +25,7 @@ async fn main() {
         usage(&args[0]);
     }
 
-    let env = match load_tunnel_env() {
+    let cfg = match from_env() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{e}");
@@ -42,7 +35,7 @@ async fn main() {
 
     let code = match args[1].as_str() {
         "server" if args.len() >= 3 => match parse_port(&args[2]) {
-            Ok(port) => match server::run_server(port, env).await {
+            Ok(port) => match run_server(port, cfg).await {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("server: {e}");
@@ -55,7 +48,7 @@ async fn main() {
             }
         },
         "client" if args.len() >= 4 => match parse_port(&args[3]) {
-            Ok(port) => match client::run_client(&args[2], port, env).await {
+            Ok(port) => match run_client(&args[2], port, cfg).await {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("client: {e}");

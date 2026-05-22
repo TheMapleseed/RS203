@@ -6,7 +6,7 @@ use super::symmetric::{hash_g, kyber_shake128_absorb, xof_squeezeblocks, XOF_BLO
 fn rej_uniform(r: &mut [i16], buf: &[u8]) -> usize {
     let mut ctr = 0usize;
     let mut pos = 0usize;
-    while ctr < KYBER_N && pos + 3 <= buf.len() {
+    while ctr < r.len() && pos + 3 <= buf.len() {
         let val0 = (u16::from(buf[pos]) | (u16::from(buf[pos + 1]) << 8)) & 0xfff;
         let val1 = (u16::from(buf[pos + 1]) >> 4 | (u16::from(buf[pos + 2]) << 4)) & 0xfff;
         pos += 3;
@@ -14,7 +14,7 @@ fn rej_uniform(r: &mut [i16], buf: &[u8]) -> usize {
             r[ctr] = val0 as i16;
             ctr += 1;
         }
-        if ctr < KYBER_N && val1 < KYBER_Q as u16 {
+        if ctr < r.len() && val1 < KYBER_Q as u16 {
             r[ctr] = val1 as i16;
             ctr += 1;
         }

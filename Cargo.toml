@@ -7,4 +7,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TheMapleseed/RS203"
+homepage = "https://github.com/TheMapleseed/RS203"
+documentation = "https://docs.rs/fips203-core"
+readme = "README.md"
 rust-version = "1.75"
+authors = ["TheMapleseed Contributors"]
+keywords = ["cryptography", "post-quantum", "ml-kem", "kem", "fips203"]
+categories = ["cryptography", "network-programming"]
+
+[workspace.dependencies]
+fips203-core = { version = "0.1.0", path = "crates/fips203-core" }

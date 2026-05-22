@@ -1,62 +1,120 @@
-# RS203 — Rust port of [TheMapleseed/203](https://github.com/TheMapleseed/203)
+# RS203 — Rust library for [TheMapleseed/203](https://github.com/TheMapleseed/203)
 
-Post-quantum–ready encrypted tunnel built around **ML-KEM-768** (FIPS 203) and the **FIPS203TUNNEL-GCM** record layer (SHAKE256 + SHA3-256, GCM-like framing). This repository is a **Rust reimplementation** intended to stay **wire-compatible** with the C reference.
+[![crates.io](https://img.shields.io/crates/v/fips203-core.svg)](https://crates.io/crates/fips203-core)
+[![docs.rs](https://docs.rs/fips203-core/badge.svg)](https://docs.rs/fips203-core)
+[![license](https://img.shields.io/crates/l/fips203-core.svg)](https://github.com/TheMapleseed/RS203/blob/main/LICENSE)
 
-## What exists today
+Post-quantum–ready encrypted tunnel: **ML-KEM-768** (FIPS 203), **FIPS203TUNNEL-GCM** records, PSK+KEM handshake, in-band rekey, and MsgPack string lines. Pure Rust, wire-compatible with the C `fips203_tunnel` — not FFI wrappers around the C tree.
 
-| Crate / binary | Status |
-| --- | --- |
-| [`fips203-core`](crates/fips203-core) | **Pure Rust** (`std` only): PQClean ML-KEM-768 clean, FIPS202, frames, MsgPack helpers |
-| [`fips203_tunnel`](crates/fips203-tunnel) | **`fips203_tunnel`** binary (tokio): PSK+ML-KEM handshake, bounded queues, in-band rekey, MsgPack stdin client |
+## crates.io
 
-### Tests (parity with C smoke tests)
-
-```bash
-cargo test -p fips203-core
+```toml
+[dependencies]
+fips203-core = "0.1"
+# async TCP tunnel + CLI binary:
+fips203-tunnel = "0.1"
 ```
 
-- `frame_smoke` — same vectors as `test/tframe_smoke.c`
-- `msgpack_roundtrip` — same cases as `tests/fips203_msgpack_roundtrip.c`
+See [PUBLISHING.md](PUBLISHING.md) for release steps.
 
-## Run the tunnel
+## Crates
+
+| Crate | Role |
+| --- | --- |
+| [`fips203-core`](crates/fips203-core) | **Library** — crypto, frames, handshake, rekey, MsgPack (`std` only, **zero non-std deps**) |
+| [`fips203-tunnel`](crates/fips203-tunnel) | **Library + CLI** — Tokio TCP tunnel (`fips203_tunnel` binary), [`TunnelLink`](crates/fips203-tunnel/src/link.rs) for async apps |
+
+### `fips203-core` — embed anywhere
+
+```toml
+[dependencies]
+fips203-core = "0.1"
+```
+
+```rust
+use std::net::TcpStream;
+use fips203_core::{
+    handshake_client, load_handshake_config_from_env, load_rekey_interval_from_env,
+    TunnelRuntime,
+};
+```
+
+Blocking `std::net` sample: `cargo run -p fips203-core --example loopback_std -- …`
+
+### `fips203-tunnel` — async TCP session
+
+```toml
+[dependencies]
+fips203-tunnel = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+```rust
+use fips203_tunnel::{from_env, LinkMode, TunnelLink};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let cfg = from_env().expect("TUNNEL_* env");
+    let mut link = TunnelLink::connect("127.0.0.1", 9999, &cfg).await?;
+    link.send_line("hello").await?;
+    if let Some(payload) = link.recv_payload().await? {
+        println!("got {} bytes", payload.len());
+    }
+    link.shutdown();
+    link.join().await;
+    Ok(())
+}
+```
+
+CLI modes (`StdinClient` / `EchoServer`) are built on the same [`TunnelLink`](crates/fips203-tunnel/src/link.rs); use `LinkMode::Application` when you drive I/O yourself.
+
+## Tests
+
+```bash
+cargo test --workspace
+cargo build -p fips203-tunnel --release
+```
+
+| Area | Tests |
+| --- | --- |
+| **MsgPack** | `msgpack_*`, `msgpack_vs_opaque_frame` |
+| **Opaque plaintext** | `raw_plaintext_frame`, `frame_smoke`, `wire_roundtrip` |
+| **Handshake / rekey** | `handshake_duplex`, `rekey_epoch`, `handshake_tcp` |
+| **Live TCP** | `tunnel_link_loopback` (opaque + MsgPack via `TunnelLink`) |
+| **C interop** | `scripts/interop_tunnel.sh`, `interop_rekey.sh` |
+
+## CLI
 
 ```bash
 cargo build -p fips203-tunnel --release
 export TUNNEL_PSK_HEX=<64 hex chars>
 export TUNNEL_CLIENT_ID=alice
 export TUNNEL_SERVER_ID=bob
-./target/release/fips203_tunnel server 9999   # terminal 1
-./target/release/fips203_tunnel client 127.0.0.1 9999   # terminal 2 — type ASCII lines
+./target/release/fips203_tunnel server 9999
+./target/release/fips203_tunnel client 127.0.0.1 9999
 ```
 
-## Roadmap
+Optional: `TUNNEL_QUEUE_DEPTH`, `TUNNEL_MAX_QUEUE_MB`, `TUNNEL_MAX_QUEUE_BYTES`, `TUNNEL_REKEY_INTERVAL`.
 
-1. **Interop tests** — Rust client ↔ C server and vice versa on a loopback port.
-2. **FFI / bindings** — optional `cdylib` for Python/Node.
-
-## Environment
-
-Same as the C project:
+## Wire interop (optional, vs C `fips203_tunnel`)
 
 ```bash
-export TUNNEL_PSK_HEX=<64 hex chars>
-export TUNNEL_CLIENT_ID=<label>
-export TUNNEL_SERVER_ID=<label>
+git clone --depth 1 https://github.com/TheMapleseed/203.git _ref-203
+./scripts/interop_tunnel.sh
+./scripts/interop_rekey.sh
+./scripts/rust_tunnel_smoke.sh
 ```
 
-Optional queue/rekey knobs: `TUNNEL_MAX_QUEUE_MB`, `TUNNEL_MAX_QUEUE_BYTES`, `TUNNEL_QUEUE_DEPTH`, `TUNNEL_REKEY_INTERVAL`.
+## C reference map
 
-## Reference layout (C repo)
-
-| C path | Rust equivalent |
+| C | Rust |
 | --- | --- |
-| `src/fips203_frame.c` | `crates/fips203-core/src/frame.rs` |
-| `src/fips203_msgpack.c` + MSGPACK-C | `crates/fips203-core/src/msgpack.rs` |
-| `src/mlkem.c` + PQClean | `crates/fips203-core/src/mlkem/pqclean768/` |
-| `src/tunnel_main.c` | `crates/fips203-tunnel` (planned) |
-
-A shallow clone of the C tree for local diffing may live in `_ref-203/` (gitignored).
+| `fips203_frame.c` | `fips203-core` — `frame.rs`, `session.rs` |
+| `fips203_msgpack.c` | `fips203-core` — `msgpack.rs` |
+| `mlkem.c` + PQClean | `fips203-core` — `mlkem/pqclean768/` |
+| `tunnel_main.c` (protocol) | `fips203-core` — `tunnel.rs` |
+| `tunnel_main.c` (TCP) | `fips203-tunnel` — `link.rs`, `runtime.rs`, `fips203_tunnel` binary |
 
 ## License
 
-Match the upstream [203](https://github.com/TheMapleseed/203) license when you publish; this scaffold does not include `LICENSE` yet — add the same terms as the parent repo before release.
+**MIT OR Apache-2.0** (`LICENSE`). Building the upstream C tunnel for interop uses **GPLv3** (203).
